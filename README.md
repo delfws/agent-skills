@@ -10,6 +10,7 @@
 | [douyin-downloader](skills/douyin-downloader) | 抖音无水印视频下载，支持短链/完整链接/分享文案 | Python 3 |
 | [weibo-scraper](skills/weibo-scraper) | 微博用户内容抓取，含高清图片/视频下载 | Python 3 |
 | [teaching-plan-generator](skills/teaching-plan-generator) | 根据课文自动生成完整教案，支持文字和图片输出 | Node.js |
+| [mimo-v2-5-omni](skills/mimo-v2-5-omni) | MiMo V2.5 多模态理解，图片/视频/音频分析与转录 | Python 3 |
 
 ## 快速安装
 
@@ -61,6 +62,15 @@ npx skills add delfws/agent-skills -g
 - 教学反思
 
 支持输出为文字和图片两种格式。
+
+### 🎙️ mimo-v2-5-omni（多模态理解）
+
+使用 MiMo V2.5 模型进行图片、视频、音频的理解与分析。支持：
+- 图片描述、OCR 文字提取、截图分析
+- 视频内容分析、画面描述、关键信息提取
+- 语音转录、音频内容分析
+
+需要配置 `MIMO_API_KEY` 环境变量。
 
 ## 本地开发
 
