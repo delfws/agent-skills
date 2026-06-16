@@ -1,0 +1,19 @@
+{
+  "name": "agent-skills",
+  "version": "1.0.0",
+  "description": "Agent skills - 抖音/微博内容工具 & 教案生成",
+  "keywords": [
+    "agent-skills",
+    "skills",
+    "ai-agents",
+    "douyin",
+    "weibo",
+    "teaching-plan",
+    "content-creation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/delfws/agent-skills.git"
+  },
+  "license": "MIT"
+}

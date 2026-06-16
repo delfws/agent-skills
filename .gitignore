@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# AI agents
+.agent/
+.agents/
+.claude/
+.cursor/
+
+# Environment
+.env
+.env.*
