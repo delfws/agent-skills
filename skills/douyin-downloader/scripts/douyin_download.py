@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-抖音无水印多清晰度视频下载脚本
+抖音无水印视频下载脚本
 用法: python douyin_download.py <分享链接> [--quality <清晰度>] [--output <输出目录>] [--list-only]
 
-纯 Python 标准库，无需 pip install。
-原理：通过 iesdouyin.com 分享页获取视频元数据，替换 playwm→play 实现无水印。
+混合方案：iesdouyin.com 获取视频元数据 + yt-dlp 下载。
+兼顾无水印、多清晰度、自动格式合并。
 """
 
 import argparse
@@ -12,6 +12,8 @@ import http.cookiejar
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -21,8 +23,6 @@ import urllib.request
 
 UA_MOBILE = ('Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 '
              '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36')
-UA_DESKTOP = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-              '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36')
 
 QUALITY_MAP = {
     'high':    ['1080p', '1080', '1280p'],
@@ -36,7 +36,6 @@ DEFAULT_QUALITY = 'high'
 # ── HTTP 工具 ─────────────────────────────────────────────────────────────
 
 def http_get(url: str, headers: dict = None, timeout: int = 15) -> tuple:
-    """GET 请求，返回 (status, resp_headers, body_str)"""
     hdrs = {'User-Agent': UA_MOBILE, 'Accept': 'text/html,*/*'}
     if headers:
         hdrs.update(headers)
@@ -51,7 +50,6 @@ def http_get(url: str, headers: dict = None, timeout: int = 15) -> tuple:
 
 
 def http_redirect_url(url: str, timeout: int = 15) -> str:
-    """获取重定向后的最终 URL"""
     hdrs = {'User-Agent': UA_MOBILE, 'Accept': 'text/html,*/*'}
     req = urllib.request.Request(url, headers=hdrs)
     try:
@@ -62,7 +60,6 @@ def http_redirect_url(url: str, timeout: int = 15) -> str:
 
 
 def download_file(url: str, filepath: str, chunk_size: int = 8192):
-    """下载文件"""
     hdrs = {'User-Agent': UA_MOBILE, 'Referer': 'https://www.douyin.com/'}
     req = urllib.request.Request(url, headers=hdrs)
     resp = urllib.request.urlopen(req, timeout=120)
@@ -81,16 +78,32 @@ def download_file(url: str, filepath: str, chunk_size: int = 8192):
     print()
 
 
+# ── yt-dlp 定位 ──────────────────────────────────────────────────────────
+
+def find_yt_dlp() -> str | None:
+    path = shutil.which('yt-dlp')
+    if path:
+        return path
+    for candidate in [
+        os.path.expanduser('~/.local/bin/yt-dlp'),
+        '/usr/local/bin/yt-dlp',
+        '/usr/bin/yt-dlp',
+    ]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 # ── 链接解析 ──────────────────────────────────────────────────────────────
 
 def extract_url_from_text(text: str) -> str | None:
-    """从文本中提取抖音链接"""
     text = text.strip()
     for pattern in [
         r'https?://v\.douyin\.com/\S+/?',
         r'https?://www\.douyin\.com/video/(\d+)',
         r'https?://www\.douyin\.com/discover\?modal_id=(\d+)',
         r'https?://m\.douyin\.com/share/video/(\d+)',
+        r'https?://www\.douyin\.com/note/\d+',
     ]:
         m = re.search(pattern, text)
         if m:
@@ -101,7 +114,6 @@ def extract_url_from_text(text: str) -> str | None:
 
 
 def resolve_share_url(share_url: str) -> str:
-    """解析短链"""
     try:
         final = http_redirect_url(share_url)
         print(f"[+] 短链: {share_url}")
@@ -113,12 +125,12 @@ def resolve_share_url(share_url: str) -> str:
 
 
 def extract_aweme_id(url: str) -> str | None:
-    """从 URL 提取 aweme_id"""
     for pattern in [
         r'/video/(\d+)',
         r'modal_id=(\d+)',
         r'aweme_id=(\d+)',
         r'item_ids=(\d+)',
+        r'/note/(\d+)',
     ]:
         m = re.search(pattern, url)
         if m:
@@ -131,34 +143,23 @@ def extract_aweme_id(url: str) -> str | None:
     return None
 
 
-# ── 核心：通过 iesdouyin 分享页获取视频信息 ──────────────────────────────
+# ── 通过 iesdouyin 获取视频信息 ──────────────────────────────────────────
 
 def get_video_info_from_share(aweme_id: str) -> dict:
-    """
-    通过 iesdouyin.com 分享页获取视频信息。
-    返回格式: {aweme_id, desc, author, duration, width, height, qualities: [{label, url, width, height, bitrate}]}
-    """
     share_url = f'https://www.iesdouyin.com/share/video/{aweme_id}/'
     status, _, html = http_get(share_url)
-
     if status != 200 or len(html) < 1000:
         raise RuntimeError(f"分享页请求失败 (status={status}, len={len(html)})")
-
-    # 提取 window._ROUTER_DATA
     router_data = _extract_router_data(html)
     if not router_data:
         raise RuntimeError("无法从分享页提取 _ROUTER_DATA")
-
-    # 提取视频信息
     item = _find_video_item(router_data)
     if not item:
         raise RuntimeError("未找到视频数据 (item_list)")
-
     return _parse_video_item(item)
 
 
 def _extract_router_data(html: str) -> dict | None:
-    """从 HTML 提取 window._ROUTER_DATA JSON"""
     idx = html.find('window._ROUTER_DATA')
     if idx < 0:
         return None
@@ -166,8 +167,6 @@ def _extract_router_data(html: str) -> dict | None:
     json_start = html.find('{', eq_idx)
     if json_start < 0:
         return None
-
-    # 计算括号深度找到 JSON 结束位置
     depth = 0
     i = json_start
     while i < len(html):
@@ -185,9 +184,7 @@ def _extract_router_data(html: str) -> dict | None:
 
 
 def _find_video_item(data) -> dict | None:
-    """递归查找 item_list 中的第一个视频"""
     if isinstance(data, dict):
-        # videoInfoRes.item_list[0]
         if 'videoInfoRes' in data:
             items = data['videoInfoRes'].get('item_list', [])
             if items:
@@ -207,14 +204,11 @@ def _find_video_item(data) -> dict | None:
 
 
 def _parse_video_item(item: dict) -> dict:
-    """解析视频 item，提取下载信息"""
     video = item.get('video', {})
     author = item.get('author', {})
 
-    # 封面图
     cover = video.get('cover', {}) or video.get('origin_cover', {})
     cover_urls = cover.get('url_list', []) if isinstance(cover, dict) else []
-    # 优先选 jpeg 格式（兼容性好），没有则取第一个
     cover_url = ''
     for u in cover_urls:
         if '.jpeg' in u or '.jpg' in u:
@@ -234,12 +228,10 @@ def _parse_video_item(item: dict) -> dict:
         'qualities': [],
     }
 
-    # 主播放地址 (play_addr)
     play_addr = video.get('play_addr', {})
     play_urls = play_addr.get('url_list', [])
     if play_urls:
         raw_url = play_urls[0]
-        # playwm → play 去水印
         no_wm_url = raw_url.replace('playwm', 'play')
         result['qualities'].append({
             'label': 'default',
@@ -249,7 +241,6 @@ def _parse_video_item(item: dict) -> dict:
             'bitrate': 0,
         })
 
-    # 多清晰度 (bit_rate) — 部分视频有
     bit_rates = video.get('bit_rate') or []
     for br in bit_rates:
         br_urls = br.get('play_addr', {}).get('url_list', [])
@@ -264,9 +255,7 @@ def _parse_video_item(item: dict) -> dict:
                 'bitrate': br.get('bit_rate', 0),
             })
 
-    # 如果 bit_rate 有数据，去掉 default（避免重复）
     if len(result['qualities']) > 1 and result['qualities'][0]['label'] == 'default':
-        # 检查 default 的分辨率是否和某个 bit_rate 重复
         seen = set()
         unique = []
         for q in result['qualities']:
@@ -278,24 +267,19 @@ def _parse_video_item(item: dict) -> dict:
 
     if not result['qualities']:
         raise RuntimeError("未找到可下载的视频链接")
-
     return result
 
 
 # ── 清晰度选择 ────────────────────────────────────────────────────────────
 
 def select_quality(qualities: list[dict], preferred: str = DEFAULT_QUALITY) -> dict:
-    """选择清晰度"""
     if not qualities:
         raise RuntimeError("没有可用的清晰度")
-
     preferred_labels = QUALITY_MAP.get(preferred, QUALITY_MAP[DEFAULT_QUALITY])
     for label_pattern in preferred_labels:
         for q in qualities:
             if label_pattern.lower() in q['label'].lower():
                 return q
-
-    # 回退：按分辨率降序
     return sorted(qualities, key=lambda x: (x['height'], x['bitrate']), reverse=True)[0]
 
 
@@ -303,14 +287,15 @@ def select_quality(qualities: list[dict], preferred: str = DEFAULT_QUALITY) -> d
 
 def main():
     parser = argparse.ArgumentParser(
-        description='抖音无水印多清晰度视频下载工具',
+        description='抖音无水印视频下载工具',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''\
 示例:
   %(prog)s "https://v.douyin.com/xxxxx/"
-  %(prog)s "7777777777" -q medium
-  %(prog)s "https://www.douyin.com/video/123456789" --list-only
+  %(prog)s "https://www.douyin.com/video/123456789" -q medium
+  %(prog)s "https://v.douyin.com/xxxxx/" --list-only
   %(prog)s "分享文案 https://v.douyin.com/xxxxx/" -o ./downloads
+  %(prog)s "https://v.douyin.com/xxxxx/" --json
         '''
     )
     parser.add_argument('url', help='抖音分享链接、视频ID或包含链接的文本')
@@ -326,6 +311,8 @@ def main():
     parser.add_argument('--json', '-j', action='store_true',
                         help='输出 JSON 格式')
     args = parser.parse_args()
+
+    yt_dlp_bin = find_yt_dlp()
 
     # 1. 提取链接
     raw_url = extract_url_from_text(args.url)
@@ -362,16 +349,20 @@ def main():
         print(f"[-] {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 5. 输出
+    # 5. JSON 输出
     if args.json:
         print(json.dumps(info, ensure_ascii=False, indent=2))
         return
 
+    # 6. 打印视频信息
     print(f"\n{'='*60}")
     print(f"📌 标题: {info['desc']}")
     print(f"👤 作者: {info['author']}")
-    print(f"⏱  时长: {info['duration']}s")
-    print(f"📐 分辨率: {info['width']}x{info['height']}")
+    if info['duration']:
+        mins, secs = divmod(info['duration'], 60)
+        print(f"⏱  时长: {mins}:{secs:02d}")
+    if info['width'] and info['height']:
+        print(f"📐 分辨率: {info['width']}x{info['height']}")
     if info.get('cover_url'):
         print(f"🖼  封面: {info['cover_url'][:80]}...")
     print(f"🎬 可用清晰度: {len(info['qualities'])} 种")
@@ -388,11 +379,11 @@ def main():
     if args.list_only:
         return
 
-    # 6. 选择清晰度
+    # 7. 选择清晰度
     selected = select_quality(info['qualities'], args.quality)
     print(f"\n[*] 选择: {selected['label']} ({selected['width']}x{selected['height']})")
 
-    # 7. 下载
+    # 8. 下载
     os.makedirs(args.output, exist_ok=True)
     safe_desc = re.sub(r'[\\/:*?"<>|\n\r]', '_', info['desc'])[:80].strip('_ ')
     filename = f"{safe_desc}.mp4" if safe_desc else "video.mp4"
@@ -404,13 +395,42 @@ def main():
         counter += 1
 
     print(f"[↓] 下载视频: {filepath}")
-    try:
-        download_file(selected['url'], filepath)
-        size = os.path.getsize(filepath)
-        print(f"[✓] 视频完成: {filepath} ({size:,} bytes)")
-    except Exception as e:
-        print(f"[-] 视频下载失败: {e}", file=sys.stderr)
-        sys.exit(1)
+
+    # 优先用 yt-dlp 下载
+    if yt_dlp_bin:
+        try:
+            cmd = [
+                yt_dlp_bin, '--no-warnings', '--no-check-certificates',
+                '--referer', 'https://www.douyin.com/',
+                '--user-agent', UA_MOBILE,
+                '-o', filepath,
+                '--no-part',
+                selected['url'],
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line and ('[download]' in line or 'Merger' in line or 'Merging' in line):
+                    print(f"  {line}", flush=True)
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"yt-dlp 下载失败 (exit={proc.returncode})")
+        except Exception as e:
+            print(f"[!] yt-dlp 下载失败，回退到直接下载: {e}", file=sys.stderr)
+            try:
+                download_file(selected['url'], filepath)
+            except Exception as e2:
+                print(f"[-] 下载失败: {e2}", file=sys.stderr)
+                sys.exit(1)
+    else:
+        try:
+            download_file(selected['url'], filepath)
+        except Exception as e:
+            print(f"[-] 下载失败: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    size = os.path.getsize(filepath)
+    print(f"[✓] 视频完成: {filepath} ({size:,} bytes)")
 
     # 下载封面图
     if args.cover and info.get('cover_url'):
