@@ -98,6 +98,34 @@ description: "根据课文自动生成完整教案（教学目标/分析/过程/
 
 内容多时（如多个选段合成一课）**做减法而非加行**：合并同类项、只写代表性例子，超出上限的部分宁可略过也不扩写。
 
+**机读配置（供 `scripts/generate-image.js` 出图前校验，勿删）**
+脚本会解析下面这个 JSON 围栏块作为红线的**唯一事实源**：改红线只改这里，脚本自动跟随，不要去脚本里改数字。块内字段与上表一一对应，`steps` 是「教学步骤」列允许出现的项（顺序即行序）。校验按汉字计数；合课时在教案数据里置 `"multi": true`，全文上限改用 `total_multi`。
+
+```json
+{
+  "limits": {
+    "total": 800,
+    "total_multi": 1000,
+    "info_rows": 4,
+    "goal_items": 3,
+    "goal_per_item": 25,
+    "analysis_sections": ["重点", "难点", "教法", "教具"],
+    "analysis_per_item": 25,
+    "table_total": 400,
+    "import_cell": 40,
+    "teacher_new": 80,
+    "student_new": 50,
+    "intent_new": 30,
+    "board_chars": 60,
+    "board_lines": 6,
+    "summary": 60,
+    "reflection_items": 1,
+    "reflection": 30
+  },
+  "steps": ["新课导入", "新课教学"]
+}
+```
+
 ### 教学过程表格内容要求（重要）
 - **教师活动、学生活动、设计意图三栏内容要精简但有内容，每栏1-2句话**
 - 不要写成长段落，保持简洁明了
@@ -152,74 +180,25 @@ node scripts/generate-image.js /tmp/lesson-data.json
 ```
 
 **JSON 数据格式：**
+完整可运行示例见 `templates/example-lesson.json`（`--demo` 读的就是它，与本技能规范同源维护）。骨架如下，`"multi": true` 表示多选段/多内容合课，全文上限按 `total_multi` 计：
+
 ```json
 {
   "title": "小学音乐教案",
   "outputPath": "/tmp/教案-歌曲名.png",
-  "infoTable": [
-    ["课 题", "歌曲名称"],
-    ["课 时", "1课时（40分钟）"],
-    ["课 型", "唱歌课"],
-    ["备课时间", "2026年6月9日"]
-  ],
+  "multi": false,
+  "infoTable": [["课 题", "歌曲名称"], ["课 时", "1课时（40分钟）"], ["课 型", "唱歌课"], ["备课时间", "2026年10月19日"]],
   "sections": [
-    {
-      "title": "一、教学目标",
-      "type": "list",
-      "items": [
-        { "label": "感受与体验", "text": "目标内容..." },
-        { "label": "能力与方法", "text": "目标内容..." }
-      ]
-    },
-    {
-      "title": "二、教学分析",
-      "type": "subsections",
-      "subsections": [
-        {
-          "title": "教学重点",
-          "items": [{ "text": "重点内容..." }]
-        }
-      ]
-    },
-    {
-      "title": "三、教学过程",
-      "type": "table",
-      "headers": ["教学步骤", "教师活动", "学生活动", "设计意图"],
-      "colWidths": [120, 260, 170, 150],
+    { "title": "一、教学目标", "type": "list", "items": [{ "label": "感受与体验", "text": "..." }] },
+    { "title": "二、教学分析", "type": "subsections", "subsections": [{ "title": "教学重点", "items": [{ "text": "..." }] }] },
+    { "title": "三、教学过程", "type": "table", "headers": ["教学步骤", "教师活动", "学生活动", "设计意图"], "colWidths": [120, 260, 170, 150],
       "rows": [
-        {
-          "cells": [
-            { "text": "一、新课导入", "bold": true },
-            { "text": "教师活动内容..." },
-            { "text": "学生活动内容..." },
-            { "text": "设计意图..." }
-          ]
-        },
-        {
-          "cells": [
-            { "text": "二、新课教学", "bold": true },
-            { "text": "①…②…③…（多个教学动作在本格内分点）" },
-            { "text": "学生活动内容..." },
-            { "text": "设计意图..." }
-          ]
-        }
-      ]
-    },
-    {
-      "title": "四、板书设计",
-      "type": "board",
-      "content": "板书内容（用换行分隔）"
-    },
-    {
-      "title": "五、课堂小结",
-      "type": "text",
-      "content": "小结文字..."
-    },
-    {
-      "title": "六、教学反思",
-      "type": "list",
-      "items": [{ "text": "反思内容..." }]
-    }
+        { "cells": [{ "text": "一、新课导入", "bold": true }, { "text": "..." }, { "text": "..." }, { "text": "..." }] },
+        { "cells": [{ "text": "二、新课教学", "bold": true }, { "text": "①…②…（分点）" }, { "text": "①…②…（逐条对应）" }, { "text": "..." }] }
+      ] },
+    { "title": "四、板书设计", "type": "board", "content": "（换行分隔各行）" },
+    { "title": "五、课堂小结", "type": "text", "content": "..." },
+    { "title": "六、教学反思", "type": "list", "items": [{ "text": "..." }] }
   ]
 }
 ```
@@ -313,3 +292,5 @@ const subItemX = SPACING.pagePaddingX + 40;  // 条目内容：100px
 11. **board 类型高度：** 板书设计容器高度已改为动态计算，无需手动指定高度
 12. **字数红线优先：** 各部分字数上限见「字数红线」一节，超线即删；内容多时合并同类项而非增加篇幅
 13. **两段式教学过程：** 「教学步骤」列固定只有「新课导入」「新课教学」两项、各 1 行；不设初感、深入赏析、拓展延伸、课堂小结等独立环节，也不把新课教学拆成（一）（二）（三）多行，多个教学动作在教师活动格内用 ①②③ 分点，学生活动逐条对应，设计意图保持一句
+14. **出图前自动校验：** 脚本会解析「字数红线」一节的机读配置块，对教案数据逐项校验（步骤名、各栏字数、分点对应、板块条数），超线**拒绝出图**并提示差多少字；只校验不出图用 `<json文件> --check`。改红线只改 SKILL.md 里那个 json 块，脚本自动跟随，**不要在脚本里写死数字**
+15. **示例单一源：** 完整可运行示例在 `templates/example-lesson.json`（`--demo` 读的就是它），本文件内只保留 JSON 骨架；改规范时两者同步改，脚本内不再内嵌示例数据

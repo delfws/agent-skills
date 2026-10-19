@@ -379,21 +379,187 @@ function escapeXml(text) {
 }
 
 /**
+ * 机读配置：从 SKILL.md 的「字数红线」一节读取（红线的唯一事实源）
+ */
+function loadSkillConfig() {
+  const skillPath = path.join(__dirname, '..', 'SKILL.md');
+  if (!fs.existsSync(skillPath)) {
+    throw new Error(`未找到 SKILL.md: ${skillPath}`);
+  }
+  const md = fs.readFileSync(skillPath, 'utf-8');
+  const blocks = Array.from(md.matchAll(/```json\s*([\s\S]*?)```/g), m => m[1]);
+  const block = blocks.find(b => b.includes('"limits"'));
+  if (!block) {
+    throw new Error('SKILL.md 中未找到含 "limits" 的机读配置块（见「字数红线」一节）');
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(block);
+  } catch (e) {
+    throw new Error('SKILL.md 机读配置块 JSON 解析失败: ' + e.message);
+  }
+  if (!cfg.limits || !Array.isArray(cfg.steps) || cfg.steps.length === 0) {
+    throw new Error('SKILL.md 机读配置块缺少 limits 或 steps');
+  }
+  return cfg;
+}
+
+/** 汉字计数（与 SKILL.md 字数口径一致） */
+function zhCount(s) {
+  return ((s || '').match(/[\u4e00-\u9fff]/g) || []).length;
+}
+
+/** 按 SKILL.md 配置校验教案数据，返回错误列表（空数组 = 通过） */
+function validateData(data, cfg) {
+  const L = cfg.limits;
+  const errs = [];
+  const secs = data.sections || [];
+  const zh = zhCount;
+
+  // 1. 表头
+  if (!Array.isArray(data.infoTable) || data.infoTable.length !== L.info_rows) {
+    errs.push(`表头信息应为 ${L.info_rows} 行，实际 ${data.infoTable ? data.infoTable.length : 0} 行`);
+  }
+
+  // 2. 教学目标
+  const goals = secs.find(s => s.type === 'list' && (s.title || '').includes('教学目标'));
+  if (!goals) {
+    errs.push('缺少「教学目标」板块');
+  } else {
+    if (goals.items.length !== L.goal_items) {
+      errs.push(`教学目标应为 ${L.goal_items} 条，实际 ${goals.items.length} 条`);
+    }
+    goals.items.forEach((it, i) => {
+      const n = zh(it.label) + zh(it.text);
+      if (n > L.goal_per_item) errs.push(`教学目标第 ${i + 1} 条 ${n} 字，超出上限 ${L.goal_per_item}（差 ${n - L.goal_per_item} 字）`);
+    });
+  }
+
+  // 3. 教学分析
+  const ana = secs.find(s => s.type === 'subsections');
+  if (!ana) {
+    errs.push('缺少「教学分析」板块');
+  } else {
+    L.analysis_sections.forEach(t => {
+      if (!ana.subsections.some(sub => (sub.title || '').includes(t))) errs.push(`教学分析缺少「${t}」`);
+    });
+    ana.subsections.forEach(sub => {
+      const n = sub.items.reduce((a, it) => a + zh(it.label) + zh(it.text), 0);
+      if (n > L.analysis_per_item) errs.push(`教学分析「${sub.title}」${n} 字，超出上限 ${L.analysis_per_item}（差 ${n - L.analysis_per_item} 字）`);
+    });
+  }
+
+  // 4. 教学过程
+  const tbl = secs.find(s => s.type === 'table');
+  if (!tbl) {
+    errs.push('缺少「教学过程」表格');
+  } else {
+    if (tbl.rows.length !== cfg.steps.length) {
+      errs.push(`教学过程应为 ${cfg.steps.length} 行（${cfg.steps.join('、')}），实际 ${tbl.rows.length} 行`);
+    }
+    tbl.rows.forEach((row, i) => {
+      const want = cfg.steps[i];
+      if (!want) return;
+      const raw = row.cells[0].text || '';
+      const got = raw.replace(/^\s*[一二三四五六七八九十]+、/, '').replace(/（[^）]*）|\([^)]*\)/g, '').trim();
+      if (got !== want) errs.push(`第 ${i + 1} 行「教学步骤」应为「${want}」，实际「${raw}」`);
+    });
+
+    // 新课导入行：每格字数
+    if (tbl.rows[0]) {
+      tbl.rows[0].cells.forEach((c, ci) => {
+        if (ci > 0 && zh(c.text) > L.import_cell) {
+          errs.push(`新课导入行第 ${ci + 1} 格 ${zh(c.text)} 字，超出上限 ${L.import_cell}（差 ${zh(c.text) - L.import_cell} 字）`);
+        }
+      });
+    }
+
+    // 新课教学行：三栏字数 + 分点逐条对应
+    const t2 = tbl.rows[1] && tbl.rows[1].cells;
+    if (t2) {
+      [[L.teacher_new, '教师活动', 1], [L.student_new, '学生活动', 2], [L.intent_new, '设计意图', 3]].forEach(v => {
+        const n = zh(t2[v[2]].text);
+        if (n > v[0]) errs.push(`新课教学行${v[1]} ${n} 字，超出上限 ${v[0]}（差 ${n - v[0]} 字）`);
+      });
+      const cnt = s => ((s || '').match(/[①②③④⑤⑥⑦⑧⑨]/g) || []).length;
+      const cn = cnt(t2[1].text), sn = cnt(t2[2].text);
+      if (cn > 0 && sn !== cn) errs.push(`教师活动分 ${cn} 点、学生活动分 ${sn} 点，必须逐条对应`);
+    }
+
+    const total = tbl.rows.reduce((a, row) => a + row.cells.reduce((b, c) => b + zh(c.text), 0), 0);
+    if (total > L.table_total) errs.push(`教学过程表格合计 ${total} 字，超出上限 ${L.table_total}（差 ${total - L.table_total} 字）`);
+  }
+
+  // 5. 板书设计
+  const board = secs.find(s => s.type === 'board');
+  if (!board) {
+    errs.push('缺少「板书设计」板块');
+  } else {
+    const lines = board.content.split('\n');
+    if (lines.length > L.board_lines) errs.push(`板书设计 ${lines.length} 行，超出上限 ${L.board_lines} 行`);
+    const n = zh(board.content);
+    if (n > L.board_chars) errs.push(`板书设计 ${n} 字，超出上限 ${L.board_chars} 字（差 ${n - L.board_chars} 字）`);
+  }
+
+  // 6. 课堂小结
+  const sum = secs.find(s => s.type === 'text');
+  if (!sum) {
+    errs.push('缺少「课堂小结」板块');
+  } else if (zh(sum.content) > L.summary) {
+    errs.push(`课堂小结 ${zh(sum.content)} 字，超出上限 ${L.summary} 字（差 ${zh(sum.content) - L.summary} 字）`);
+  }
+
+  // 7. 教学反思
+  const r = secs.find(s => s.type === 'list' && (s.title || '').includes('反思'));
+  if (!r) {
+    errs.push('缺少「教学反思」板块');
+  } else {
+    if (r.items.length !== L.reflection_items) errs.push(`教学反思应为 ${L.reflection_items} 条，实际 ${r.items.length} 条`);
+    r.items.forEach(it => {
+      if (zh(it.text) > L.reflection) errs.push(`教学反思 ${zh(it.text)} 字，超出上限 ${L.reflection} 字`);
+    });
+  }
+
+  // 8. 全文（合课以 multi: true 切换上限）
+  const cap = data.multi ? L.total_multi : L.total;
+  const full = zh(JSON.stringify(data));
+  if (full > cap) errs.push(`全文 ${full} 字，超出上限 ${cap} 字（差 ${full - cap} 字）`);
+
+  return errs;
+}
+
+/**
  * 主函数
  */
 async function main() {
   const args = process.argv.slice(2);
-  
+  const checkOnly = args.includes('--check');
+
   let data;
   if (args.includes('--demo')) {
-    data = getDemoData();
-  } else if (args.length > 0 && fs.existsSync(args[0])) {
-    data = JSON.parse(fs.readFileSync(args[0], 'utf-8'));
+    const demoPath = path.join(__dirname, '..', 'templates', 'example-lesson.json');
+    if (!fs.existsSync(demoPath)) throw new Error('未找到示例数据: ' + demoPath);
+    data = JSON.parse(fs.readFileSync(demoPath, 'utf-8'));
   } else {
-    console.error('用法: node generate-image.js <json_data_file>');
-    console.error('      node generate-image.js --demo');
+    const file = args.find(a => !a.startsWith('--'));
+    if (!file || !fs.existsSync(file)) {
+      console.error('用法: node generate-image.js <json_data_file>');
+      console.error('      node generate-image.js --demo');
+      console.error('      node generate-image.js <json_data_file> --check   （只校验，不出图）');
+      process.exit(1);
+    }
+    data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  }
+
+  // 出图前按 SKILL.md 机读配置校验（守门：只报错，不代改内容）
+  const errs = validateData(data, loadSkillConfig());
+  if (errs.length > 0) {
+    console.error('❌ 未通过 SKILL.md 规范校验（共 ' + errs.length + ' 项）:');
+    errs.forEach(e => console.error('   - ' + e));
     process.exit(1);
   }
+  console.log('✅ 校验通过（依据 SKILL.md 机读配置）');
+  if (checkOnly) return;
 
   const svg = generateSVG(data);
   const svgBuffer = Buffer.from(svg);
@@ -415,109 +581,6 @@ async function main() {
 
   console.log(`✅ 图片已生成: ${outputPath}`);
   console.log(`   大小: ${(fs.statSync(outputPath).size / 1024).toFixed(1)} KB`);
-}
-
-/**
- * Demo 数据
- */
-function getDemoData() {
-  return {
-    title: '小学音乐教案',
-    outputPath: '/tmp/教案-demo.png',
-    infoTable: [
-      ['课 题', '示例歌曲'],
-      ['课 时', '1课时（40分钟）'],
-      ['课 型', '唱歌课（合唱）'],
-      ['备课时间', '2026年10月19日'],
-    ],
-    sections: [
-      {
-        title: '一、教学目标',
-        type: 'list',
-        items: [
-          { label: '感受与体验', text: '聆听并演唱歌曲，感受幽静、优美的意境。' },
-          { label: '能力与方法', text: '能用连贯气息唱好弱起与长音，初步学唱二声部。' },
-          { label: '拓展与认知', text: '认识词曲作者，了解艺术歌曲。' },
-        ],
-      },
-      {
-        title: '二、教学分析',
-        type: 'subsections',
-        subsections: [
-          {
-            title: '教学重点',
-            items: [
-              { text: '6/8拍的摇曳韵律与连贯、弱起演唱。' },
-            ],
-          },
-          {
-            title: '教学难点',
-            items: [
-              { text: '二声部和谐；渐强渐弱与气息控制。' },
-            ],
-          },
-          {
-            title: '教法',
-            items: [
-              { text: '聆听模唱法、情境教学法、示范法。' },
-            ],
-          },
-          {
-            title: '教具',
-            items: [
-              { text: '钢琴、音频、多媒体课件。' },
-            ],
-          },
-        ],
-      },
-      {
-        title: '三、教学过程',
-        type: 'table',
-        headers: ['教学步骤', '教师活动', '学生活动', '设计意图'],
-        colWidths: [120, 260, 170, 150],
-        rows: [
-          {
-            cells: [
-              { text: '一、新课导入', bold: true },
-              { text: '播放歌曲音频，提问：“旋律让你想到怎样的画面？”引出课题。' },
-              { text: '安静聆听，自由描述感受。' },
-              { text: '创设幽静情境，激发兴趣，引出课题。' },
-            ],
-          },
-          {
-            cells: [
-              { text: '二、新课教学', bold: true },
-              { text: '①出示歌谱，简介词曲作者，按节奏读词；②范唱并用“呜”模唱旋律，提示6/8拍摇曳感与弱起气息；③分句学唱，处理p及渐强渐弱；④低声部接唱，两声部合成；⑤随乐完整演唱，轻晃身体表现摇曳感。' },
-              { text: '①按节奏读词；②跟琴模唱旋律；③分句学唱；④低声部接唱后合成；⑤随乐轻晃身体完整演唱。' },
-              { text: '突破6/8拍与二声部难点，落实合唱技能。' },
-            ],
-          },
-        ],
-      },
-      {
-        title: '四、板书设计',
-        type: 'board',
-        content: `示例歌曲（唱歌课 · 合唱）
-1 = F   6/8   稍慢 幽静地
-词：[德]海涅｜曲：[德]门德尔松
-6/8摇曳   弱起   连贯
-p   渐强 > 渐弱
-高声部 ＋ 低声部 ＝ 和谐`,
-      },
-      {
-        title: '五、课堂小结',
-        type: 'text',
-        content: '今天我们学唱了《示例歌曲》，在6/8拍的摇曳中感受优美的意境，也初次尝试二声部合唱，愿大家带着这份宁静继续聆听。',
-      },
-      {
-        title: '六、教学反思',
-        type: 'list',
-        items: [
-          { text: '学生二声部易随高声部跑调，下次先用琴带低声部单独巩固。' },
-        ],
-      },
-    ],
-  };
 }
 
 main().catch(err => {
