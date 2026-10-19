@@ -15,5 +15,8 @@
     "type": "git",
     "url": "https://github.com/delfws/agent-skills.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "sharp": "^0.35.5"
+  }
 }
